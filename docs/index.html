@@ -344,7 +344,11 @@
   </div>
 
   <script>
-    const API_URL = "https://tu-boat-worker.gchcxrq1j.workers.dev/api/slots";
+    const API_URL =
+      window.location.hostname === "localhost"
+      ? "http://localhost:8787/api/slots"
+      : "https://tu-boat-worker.gchcxrq1j.workers.dev/api/slots";
+      
     const WINDOW_SIZE = 7;
 
     const calendarEl = document.getElementById("calendar");
