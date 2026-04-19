@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Boot Booking Calendar</title>
+  <title>TU Bootshaus - Buchungskalender</title>
   <style>
     :root {
       --bg: #f3f5f7;
@@ -259,8 +259,6 @@
     }
 
     .slot-btn.stack-1 { top: 18px; }
-    .slot-btn.stack-2 { top: 18px; height: 48px; }
-    .slot-btn.stack-3 { top: 18px; height: 48px; }
 
     .footer {
       padding: 12px 18px 16px;
@@ -323,8 +321,8 @@
     <div class="shell">
       <div class="topbar">
         <div>
-          <h1>Boot Booking Calendar</h1>
-          <div class="subtitle">Nur verfügbare Buchungen am TU-Bootshaus am Stößensee · 7 Tage</div>
+          <h1>TU Bootshaus - Buchungskalender Segeln</h1>
+          <div class="subtitle">Verfügbare Bootsklassen am TU-Bootshaus am Stößensee zur Buchung an Einzelterminen · 7 Tagesübersicht</div>
         </div>
 
         <div class="controls">
@@ -340,7 +338,7 @@
       </div>
 
       <div class="footer">
-        Klick auf einen grünen Block öffnet die Buchung in einem neuen Tab.
+        Klick auf einen grünen Termin öffnet das Buchungsformular in einem neuen Tab.
       </div>
     </div>
   </div>
@@ -550,9 +548,6 @@
             const width = ((slot.timeRange.end - slot.timeRange.start) / total) * 100;
 
             let stackClass = "stack-1";
-            if (daySlots.length > 3) {
-              stackClass = index % 2 === 0 ? "stack-2" : "stack-3";
-            }
 
             html += `
             <form
