@@ -1,142 +1,143 @@
-/**
- * Welcome to Cloudflare Workers! This is your first worker.
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your worker in action
- * - Run `npm run deploy` to publish your worker
- *
- * Learn more at https://developers.cloudflare.com/workers/
- */
+const START_URL = "https://www.tu-sport.de/sportprogramm/bootshaus/";
+const CACHE_TTL_MS = 5 * 60 * 1000;
+const JSON_HEADERS = {
+  "content-type": "application/json; charset=utf-8",
+  "cache-control": "public, max-age=300",
+};
 
 let memoryCache = {
   data: null,
-  timestamp: 0
+  timestamp: 0,
 };
-
-const START_URL = "https://www.tu-sport.de/sportprogramm/bootshaus/";
 
 export default {
   async fetch(request) {
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") {
-      return withCors(new Response(null, { status: 204 }));
+      return cors(new Response(null, { status: 204 }));
     }
 
-    if (url.pathname === "/" || url.pathname === "/api/slots") {
-      try {
-        const now = Date.now();
-        if (memoryCache.data && now - memoryCache.timestamp < 5 * 60 * 1000)
-        {
-          return withCors(
-            new Response(JSON.stringify(memoryCache.data, null, 2), {
-              status: 200,
-              headers: {
-                "content-type": "application/json; charset=utf-8",
-                "cache-control": "public, max-age=300"
-              }
-            })
-          );
-        }
+    if (url.pathname !== "/" && url.pathname !== "/api/slots") {
+      return cors(new Response("Not found", { status: 404 }));
+    }
 
-        const data = await collectAllSlots();
-
-        memoryCache = {
-          data,
-          timestamp: now
-        };
-
-        return withCors(
-          new Response(JSON.stringify(data, null, 2), {
-            status: 200,
-            headers: {
-              "content-type": "application/json; charset=utf-8",
-              "cache-control": "public, max-age=300"
-            }
-          })
-        );
-      } catch (err) {
-        return withCors(
-          new Response(
-            JSON.stringify(
-              {
-                error: err?.message || String(err),
-                stack: err?.stack || null
-              },
-              null,
-              2
-            ),
-            {
-              status: 500,
-              headers: { "content-type": "application/json; charset=utf-8" }
-            }
-          )
-        );
+    try {
+      const now = Date.now();
+      const cached = getCached(now);
+      if (cached) {
+        return json(cached);
       }
-    }
 
-    return withCors(new Response("Not found", { status: 404 }));
-  }
+      const data = await collectAllSlots();
+      memoryCache = { data, timestamp: now };
+
+      return json(data);
+    } catch (error) {
+      return json(
+        {
+          error: error?.message || String(error),
+          stack: error?.stack || null,
+        },
+        500,
+        { "cache-control": "no-store" }
+      );
+    }
+  },
 };
+
+function getCached(now = Date.now()) {
+  if (!memoryCache.data) return null;
+  if (now - memoryCache.timestamp >= CACHE_TTL_MS) return null;
+  return memoryCache.data;
+}
+
+function json(data, status = 200, extraHeaders = {}) {
+  return cors(
+    new Response(JSON.stringify(data), {
+      status,
+      headers: {
+        ...JSON_HEADERS,
+        ...extraHeaders,
+      },
+    })
+  );
+}
 
 async function collectAllSlots() {
   const bootsverleihUrl = await findBootsverleihUrl();
   const overviewUrl = await findBootOverviewUrl(bootsverleihUrl);
   const categoryPages = await findBoatCategoryPages(overviewUrl);
 
-  const categorySourcesNested = [];
-  for (const categoryPage of categoryPages) {
-    try {
-      const sources = await discoverBookingSourcesForCategory(categoryPage);
-      categorySourcesNested.push(sources);
-    } catch (err) {
-      console.error(`Fehler bei Kategorie "${categoryPage.text}":`, err);
-    } 
-  }
+  const categorySourceResults = await Promise.allSettled(
+    categoryPages.map(discoverBookingSourcesForCategory)
+  );
 
   const bookingSources = uniqueBy(
-    categorySourcesNested.flat(),
+    categorySourceResults.flatMap((result, index) => {
+      if (result.status === "fulfilled") return result.value;
+      console.error(
+        `Fehler bei Kategorie "${categoryPages[index]?.text ?? "unbekannt"}":`,
+        result.reason
+      );
+      return [];
+    }),
     (x) => `${x.category}|${x.bookingUrl}`
   );
 
-  const availabilityPages = [];
-  for (const source of bookingSources) {
-    try {
-      const page  = await fetchAvailabilityPage(source);
-      availabilityPages.push(page);
-    } catch (err) {
-      console.error(`Fehler bei Buchungsquelle "${source.bookingUrl}":`, err);
-    } 
-  }
+  const availabilityResults = await Promise.allSettled(
+    bookingSources.map(fetchAvailabilityPage)
+  );
 
-  const sources = availabilityPages.map((p) => ({
-    category: p.category,
-    pattern: p.pattern,
-    timeRange: p.timeRange,
-    dateRange: p.dateRange,
-    dayPattern: p.dayPattern,
-    courseUrl: p.courseUrl,
-    bookingUrl: p.bookingUrl,
-    kursid: p.kursid,
-    title: p.title
-  }));
+  const availabilityPages = availabilityResults.flatMap((result, index) => {
+    if (result.status === "fulfilled") return [result.value];
+    console.error(
+      `Fehler bei Buchungsquelle "${bookingSources[index]?.bookingUrl ?? "unbekannt"}":`,
+      result.reason
+    );
+    return [];
+  });
 
-  const slots = availabilityPages.flatMap((p) => p.slots);
+  const sources = availabilityPages.map(
+    ({
+      category,
+      pattern,
+      timeRange,
+      dateRange,
+      dayPattern,
+      courseUrl,
+      bookingUrl,
+      kursid,
+      title,
+    }) => ({
+      category,
+      pattern,
+      timeRange,
+      dateRange,
+      dayPattern,
+      courseUrl,
+      bookingUrl,
+      kursid,
+      title,
+    })
+  );
+
+  const slots = availabilityPages.flatMap((page) => page.slots);
 
   return {
     updatedAt: new Date().toISOString(),
     discovery: {
       startUrl: START_URL,
       bootsverleihUrl,
-      overviewUrl
+      overviewUrl,
     },
     counts: {
       categoryPages: categoryPages.length,
       bookingSources: bookingSources.length,
-      slots: slots.length
+      slots: slots.length,
     },
     sources,
-    slots
+    slots,
   };
 }
 
@@ -144,15 +145,13 @@ async function findBootsverleihUrl() {
   const html = await fetchText(START_URL);
   const links = extractAnchors(html, START_URL);
 
-  const match =
-    findLink(
-      links,
-      (l) =>
-        /bootsverleih/i.test(l.text) ||
-        /\/bootshaus\/bootsverleih\/?$/i.test(l.href) 
-    ) || null;
+  const match = links.find(
+    (l) =>
+      /bootsverleih/i.test(l.text) ||
+      /\/bootshaus\/bootsverleih\/?$/i.test(l.href || "")
+  );
 
-  if (!match) {
+  if (!match?.href) {
     throw new Error("Bootsverleih-Link nicht gefunden.");
   }
 
@@ -163,14 +162,9 @@ async function findBootOverviewUrl(bootsverleihUrl) {
   const html = await fetchText(bootsverleihUrl);
   const links = extractAnchors(html, bootsverleihUrl);
 
-  const match =
-    findLink(
-      links,
-      (l) =>
-        /bootsübersicht/i.test(l.text)
-    ) || null;
+  const match = links.find((l) => /bootsübersicht/i.test(l.text));
 
-  if (!match) {
+  if (!match?.href) {
     throw new Error("Bootsübersicht/-Buchung-Link nicht gefunden.");
   }
 
@@ -181,15 +175,15 @@ async function findBoatCategoryPages(overviewUrl) {
   const html = await fetchText(overviewUrl);
   const links = extractAnchors(html, overviewUrl);
 
-  const categoryLinks = links.filter((l) => {
-    return (
-      /Segeln - Einzelterminbuchung/i.test(l.text) &&
-      /tu-sport\.de/i.test(l.href) &&
-      /\/kurse\//i.test(l.href)
-    ); 
-  });
-
-  return uniqueBy(categoryLinks, (x) => x.href);
+  return uniqueBy(
+    links.filter(
+      (l) =>
+        /Segeln - Einzelterminbuchung/i.test(l.text) &&
+        /tu-sport\.de/i.test(l.href || "") &&
+        /\/kurse\//i.test(l.href || "")
+    ),
+    (x) => x.href
+  );
 }
 
 async function discoverBookingSourcesForCategory(categoryLink) {
@@ -197,110 +191,83 @@ async function discoverBookingSourcesForCategory(categoryLink) {
   const links = extractAnchors(html, categoryLink.href);
   const categoryTitle = extractH1(html) || categoryLink.text;
 
-  const bookingLinks = links.filter((l) => {
-    return (
-      /zeh\.tu-berlin\.de/i.test(l.href) &&
-      /anmeldung\.fcgi/i.test(l.href) &&
-      /buchen/i.test(l.text)
-    );
-  });
-
-  return uniqueBy(
-    bookingLinks.map((link) => {
-      const meta = inferPatternMeta(html, link.href);
-      return {
-        category: categoryTitle,
-        courseUrl: categoryLink.href,
-        bookingUrl: link.href,
-        pattern: meta.pattern,
-        dateRange: meta.dateRange,
-        dayPattern: meta.dayPattern,
-        timeRange: meta.timeRange
-      };
-    }),
-    (x) => x.bookingUrl
+  const bookingLinks = uniqueBy(
+    links.filter(
+      (l) =>
+        /zeh\.tu-berlin\.de/i.test(l.href || "") &&
+        /anmeldung\.fcgi/i.test(l.href || "") &&
+        /buchen/i.test(l.text)
+    ),
+    (x) => x.href
   );
+
+  return bookingLinks.map((link) => {
+    const meta = inferPatternMeta(html, link.href);
+
+    return {
+      category: categoryTitle,
+      courseUrl: categoryLink.href,
+      bookingUrl: link.href,
+      pattern: meta.pattern,
+      dateRange: meta.dateRange,
+      dayPattern: meta.dayPattern,
+      timeRange: meta.timeRange,
+    };
+  });
 }
 
 async function fetchAvailabilityPage(source) {
   const html = await fetchText(source.bookingUrl);
+
   const title = extractClassText(html, "anm_big") || source.category;
   const kursid =
     extractInputValue(html, "Kursid") ||
     new URL(source.bookingUrl).searchParams.get("Kursid") ||
     null;
 
-  const rows = [...html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)];
-  const slots = [];
+  const slots = [...html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)].flatMap(
+    ([, rowHtml]) => {
+      const displayDate = rowHtml.match(/<b>\s*(\d{2}\.\d{2}\.\d{4})\s*<\/b>/i)?.[1];
+      if (!displayDate) return [];
 
-  for (const row of rows) {
-    const rowHtml = row[1];
+      const termin =
+        rowHtml.match(
+          /<input[^>]*type\s*=\s*["']?radio["']?[^>]*name\s*=\s*["']?Termin["']?[^>]*value\s*=\s*["']([^"']+)["']/i
+        )?.[1] || null;
 
-    const displayDateMatch = rowHtml.match(/<b>\s*(\d{2}\.\d{2}\.\d{4})\s*<\/b>/i);
-    if (!displayDateMatch) continue;
+      const cells = [...rowHtml.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)].map(
+        ([, cellHtml]) => cleanText(cellHtml)
+      );
 
-    const terminMatch = rowHtml.match(
-      /<input[^>]*type\s*=\s*["']?radio["']?[^>]*name\s*=\s*["']?Termin["']?[^>]*value\s*=\s*["']([^"']+)["']/i
-    );
-
-    const cells = [...rowHtml.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)].map((m) =>
-      cleanText(m[1])
-    );
-
-    const available = Boolean(terminMatch);
-    const termin = terminMatch?.[1] || null;
-    const weekday = cells[1] || null;
-    const time = cells[3] || null;
-    const statusText = cells[0] || null;
-    const displayDate = displayDateMatch[1];
-
-    slots.push({
-      category: source.category,
-      pattern: source.pattern,
-      dateRange: source.dateRange,
-      dayPattern: source.dayPattern,
-      timeRange: source.timeRange,
-      title,
-      courseUrl: source.courseUrl,
-      bookingUrl: source.bookingUrl,
-      bookingAction: "https://www.zeh.tu-berlin.de/cgi/anmeldung.fcgi",
-      kursid,
-      termin,
-      displayDate,
-      weekday,
-      time,
-      available,
-      statusText
-    });
-  }
+      return [
+        {
+          category: source.category,
+          pattern: source.pattern,
+          dateRange: source.dateRange,
+          dayPattern: source.dayPattern,
+          timeRange: source.timeRange,
+          title,
+          courseUrl: source.courseUrl,
+          bookingUrl: source.bookingUrl,
+          bookingAction: "https://www.zeh.tu-berlin.de/cgi/anmeldung.fcgi",
+          kursid,
+          termin,
+          displayDate,
+          weekday: cells[1] || null,
+          time: cells[3] || null,
+          available: Boolean(termin),
+          statusText: cells[0] || null,
+        },
+      ];
+    }
+  );
 
   return {
     ...source,
     title,
     kursid,
-    slots
+    slots,
   };
-}
-
-function extractColumnValue(rowHtml, columnNumber) {
-  const re = new RegExp(
-    `<div class="table-cell[^"]*column-${columnNumber}[^"]*"[^>]*>([\\s\\S]*?)<\\/div>`,
-    "i"
-  );
-
-  const match = rowHtml.match(re);
-  if (!match) return null;
-
-  let cellHtml = match[1];
-
-  // Labels wie "Details", "Datum", "Tag", "Uhrzeit" entfernen
-  cellHtml = cellHtml.replace(/<span class="tablelable">[\s\S]*?<\/span>/gi, "");
-
-  // <br> in Zeilenumbrüche umwandeln
-  cellHtml = cellHtml.replace(/<br\s*\/?>/gi, "\n");
-
-  // Restliches HTML entfernen und säubern
-  return cleanText(cellHtml).replace(/\s*\n\s*/g, ", ");
 }
 
 function inferPatternMeta(html, bookingUrl) {
@@ -314,7 +281,7 @@ function inferPatternMeta(html, bookingUrl) {
       pattern: extractColumnValue(rowHtml, 2),
       dateRange: extractColumnValue(rowHtml, 3),
       dayPattern: extractColumnValue(rowHtml, 4),
-      timeRange: extractColumnValue(rowHtml, 5)
+      timeRange: extractColumnValue(rowHtml, 5),
     };
   }
 
@@ -322,44 +289,54 @@ function inferPatternMeta(html, bookingUrl) {
     pattern: null,
     dateRange: null,
     dayPattern: null,
-    timeRange: null
+    timeRange: null,
   };
+}
+
+function extractColumnValue(rowHtml, columnNumber) {
+  const match = rowHtml.match(
+    new RegExp(
+      `<div class="table-cell[^"]*column-${columnNumber}[^"]*"[^>]*>([\\s\\S]*?)<\\/div>`,
+      "i"
+    )
+  );
+
+  if (!match) return null;
+
+  let cellHtml = match[1]
+    .replace(/<span class="tablelable">[\s\S]*?<\/span>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n");
+
+  return cleanText(cellHtml).replace(/\s*\n\s*/g, ", ");
 }
 
 async function fetchText(url) {
   const res = await fetch(url, {
     headers: {
-      "user-agent": "Mozilla/5.0 (compatible; TU-Boat-Worker/1.0)"
-    }
+      "user-agent": "Mozilla/5.0 (compatible; TU-Boat-Worker/1.0)",
+    },
   });
 
   if (!res.ok) {
     throw new Error(`Fetch fehlgeschlagen: ${url} (${res.status})`);
   }
 
-  return await res.text();
+  return res.text();
 }
 
 function extractAnchors(html, baseUrl) {
   const anchors = [];
-
-  const regex =
-    /<a\s+[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  const regex = /<a\s+[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
 
   let match;
-
   while ((match = regex.exec(html)) !== null) {
-    const hrefRaw = match[1];
-    const textRaw = match[2];
-
-    const hrefDecoded = decodeHtmlEntities(hrefRaw);
-
-    const href = safeResolveUrl(hrefDecoded, baseUrl);
+    const href = safeResolveUrl(decodeHtmlEntities(match[1]), baseUrl);
+    if (!href) continue;
 
     anchors.push({
       href,
-      text: cleanText(textRaw),
-      index: match.index
+      text: cleanText(match[2]),
+      index: match.index,
     });
   }
 
@@ -367,37 +344,41 @@ function extractAnchors(html, baseUrl) {
 }
 
 function extractH1(html) {
-  const m = html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
-  return m ? cleanText(m[1]) : null;
+  return html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i)?.[1]
+    ? cleanText(html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i)[1])
+    : null;
 }
 
 function extractClassText(html, className) {
-  const re = new RegExp(
-    `<[^>]*class=["'][^"']*\\b${escapeRegExp(className)}\\b[^"']*["'][^>]*>([\\s\\S]*?)<\\/[^>]+>`,
-    "i"
+  const match = html.match(
+    new RegExp(
+      `<[^>]*class=["'][^"']*\\b${escapeRegExp(className)}\\b[^"']*["'][^>]*>([\\s\\S]*?)<\\/[^>]+>`,
+      "i"
+    )
   );
-  const m = html.match(re);
-  return m ? cleanText(m[1]) : null;
+
+  return match ? cleanText(match[1]) : null;
 }
 
 function extractInputValue(html, name) {
-  const re = new RegExp(
-    `<input[^>]*name=["']?${escapeRegExp(name)}["']?[^>]*value=["']([^"']+)["']`,
-    "i"
+  const match = html.match(
+    new RegExp(
+      `<input[^>]*name=["']?${escapeRegExp(name)}["']?[^>]*value=["']([^"']+)["']`,
+      "i"
+    )
   );
-  const m = html.match(re);
-  return m ? decodeHtmlEntities(m[1]) : null;
-}
 
-function findLink(links, predicate) {
-  return links.find(predicate) || null;
+  return match ? decodeHtmlEntities(match[1]) : null;
 }
 
 function htmlToText(html) {
   return decodeHtmlEntities(
     html
       .replace(/<\s*br\s*\/?>/gi, "\n")
-      .replace(/<\/?(?:p|div|tr|td|th|li|ul|ol|table|tbody|thead|h1|h2|h3|h4|h5|h6)\b[^>]*>/gi, "\n")
+      .replace(
+        /<\/?(?:p|div|tr|td|th|li|ul|ol|table|tbody|thead|h1|h2|h3|h4|h5|h6)\b[^>]*>/gi,
+        "\n"
+      )
       .replace(/<[^>]+>/g, " ")
       .replace(/\u00a0/g, " ")
       .replace(/[ \t]+\n/g, "\n")
@@ -427,18 +408,18 @@ function decodeHtmlEntities(str) {
     Auml: "Ä",
     Ouml: "Ö",
     Uuml: "Ü",
-    szlig: "ß"
+    szlig: "ß",
   };
 
-  return str
-    .replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (_, entity) => {
-      if (entity[0] === "#") {
-        const isHex = entity[1]?.toLowerCase() === "x";
-        const num = parseInt(entity.slice(isHex ? 2 : 1), isHex ? 16 : 10);
-        return Number.isFinite(num) ? String.fromCodePoint(num) : _;
-      }
-      return named[entity] ?? _;
-    });
+  return str.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (full, entity) => {
+    if (entity.startsWith("#")) {
+      const isHex = entity[1]?.toLowerCase() === "x";
+      const num = parseInt(entity.slice(isHex ? 2 : 1), isHex ? 16 : 10);
+      return Number.isFinite(num) ? String.fromCodePoint(num) : full;
+    }
+
+    return named[entity] ?? full;
+  });
 }
 
 function safeResolveUrl(href, baseUrl) {
@@ -451,39 +432,27 @@ function safeResolveUrl(href, baseUrl) {
 
 function uniqueBy(arr, keyFn) {
   const seen = new Set();
-  const out = [];
-
-  for (const item of arr) {
+  return arr.filter((item) => {
     const key = keyFn(item);
-    if (seen.has(key)) continue;
+    if (seen.has(key)) return false;
     seen.add(key);
-    out.push(item);
-  }
-
-  return out;
-}
-
-
-function lastCapture(text, regex) {
-  let last = null;
-  for (const m of text.matchAll(regex)) {
-    last = m[1]?.replace(/\s+/g, " ").trim() || null;
-  }
-  return last;
+    return true;
+  });
 }
 
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function withCors(response) {
+function cors(response) {
   const headers = new Headers(response.headers);
   headers.set("access-control-allow-origin", "*");
   headers.set("access-control-allow-methods", "GET, OPTIONS");
   headers.set("access-control-allow-headers", "content-type");
+
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
-    headers
+    headers,
   });
 }
