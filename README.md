@@ -2,6 +2,11 @@
 
 Ein kleines Hobbyprojekt, das freie Bootsbuchungen für Segelboote an der TU Berlin einsammelt und als übersichtlichen Kalender darstellt.
 
+
+Hier entlang zum Ausprobieren: [https://tllsngnzlz.github.io/tu-boat-worker/](https://tllsngnzlz.github.io/tu-boat-worker/)
+
+![https://tllsngnzlz.github.io/tu-boat-worker/](docs/screenshot.png)
+
 ## Architektur
 
 Das Projekt besteht aus zwei Teilen:
@@ -16,7 +21,7 @@ Das Projekt besteht aus zwei Teilen:
 3. Von dort folgt er zur **Bootsübersicht / Buchung**.
 4. Er sammelt alle aktuellen Bootskategorie-Seiten.
 5. Pro Kategorie findet er die saisonalen Buchungslinks.
-6. Er lädt die finalen `anmeldung.fcgi`-Seiten.
+6. Er lädt die finalen Buchungsseiten mit freien Terminen.
 7. Er extrahiert verfügbare Slots.
 8. Das Frontend lädt diese Daten und rendert den Kalender.
 
